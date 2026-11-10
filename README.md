@@ -119,7 +119,7 @@ const store = drizzleStore(db, { notifications, devices, notificationPrefs, noti
 });
 ```
 
-Store methods: `loadRecipient`, `writeInbox` (the inApp write), `recordDelivery` (false if the idempotency key exists: do not send), `finishDelivery`, `touchDevice` (upsert by device id; a token seen under another device id moves), `handleDeviceResult` (device cleanup from a send result) and `pruneDevices`.
+Store methods: `loadRecipient` / `loadRecipients(ids)` (batch, for fan-out), `writeInbox` (the inApp write; returns the new row id, or null when `(type, sourceId, user)` already exists), `recordDelivery` (false if the idempotency key exists: do not send), `finishDelivery`, `touchDevice` (upsert by device id; a token seen under another device id moves), `handleDeviceResult` (device cleanup from a send result), `pruneDevices` and `pruneHistory(days)`.
 
 Devices: one row per install (`id` is stable, the token may rotate). A dead address (`deadAddress`) deletes the device at once; any other permanent failure adds a strike and the device is deleted at 3; a success resets the count; retryable failures change nothing. `pruneDevices()` removes devices unseen for `pruneInactiveAfterDays` and does nothing while that is null.
 

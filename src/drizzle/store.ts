@@ -78,13 +78,14 @@ export function drizzleStore(db: AnyPgDb, tables: NotifyTables, opts: DrizzleSto
 
     /**
      * The inApp channel's write. With a `sourceId`, a second write for the same type, source and user
-     * is ignored. Returns whether a row was inserted.
+     * is ignored. Returns the new row's id (e.g. to put in the push data so a tap can mark it read), or
+     * null when nothing was inserted.
      */
     async writeInbox(
       recipientId: string,
       content: Content,
       meta: { type?: string; sourceId?: string; actorId?: string } = {},
-    ): Promise<boolean> {
+    ): Promise<string | null> {
       const rows = await db
         .insert(notifications)
         .values({
@@ -100,7 +101,7 @@ export function drizzleStore(db: AnyPgDb, tables: NotifyTables, opts: DrizzleSto
         })
         .onConflictDoNothing()
         .returning({ id: notifications.id });
-      return rows.length > 0;
+      return rows[0]?.id ?? null;
     },
 
     /** Inserts a pending delivery row. False when the idempotency key already exists (do not send again). */

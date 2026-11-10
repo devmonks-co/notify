@@ -55,13 +55,14 @@ describe('drizzleStore', () => {
 
   it('writes one inbox row per type, source and user', async () => {
     const content = { title: 'EUR/USD', body: 'Long' };
-    expect(await ctx.store.writeInbox(ALICE, content, { type: 'alert', sourceId: 'a1', actorId: BOB })).toBe(true);
-    expect(await ctx.store.writeInbox(ALICE, content, { type: 'alert', sourceId: 'a1' })).toBe(false);
-    expect(await ctx.store.writeInbox(ALICE, content, { type: 'note' })).toBe(true);
-    expect(await ctx.store.writeInbox(ALICE, content, { type: 'note' })).toBe(true);
+    const first = await ctx.store.writeInbox(ALICE, content, { type: 'alert', sourceId: 'a1', actorId: BOB });
+    expect(first).toEqual(expect.any(String));
+    expect(await ctx.store.writeInbox(ALICE, content, { type: 'alert', sourceId: 'a1' })).toBeNull();
+    expect(await ctx.store.writeInbox(ALICE, content, { type: 'note' })).toEqual(expect.any(String));
+    expect(await ctx.store.writeInbox(ALICE, content, { type: 'note' })).toEqual(expect.any(String));
     const rows = await ctx.db.select().from(tables.notifications);
     expect(rows).toHaveLength(3);
-    expect(rows.find((row) => row.sourceId === 'a1')?.actorId).toBe(BOB);
+    expect(rows.find((row) => row.sourceId === 'a1')).toMatchObject({ id: first, actorId: BOB });
   });
 
   it('records a delivery once per idempotency key', async () => {
