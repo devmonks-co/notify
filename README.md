@@ -130,8 +130,9 @@ Devices: one row per install (`id` is stable, the token may rotate). A dead addr
 ## Release
 
 1. Bump `version` in `package.json` and commit.
-2. `npm publish` (logged in to npm as a member of the `devmonks` org). `prepublishOnly` runs typecheck, tests and the build first.
-3. Tag it: `git tag v<version> && git push --tags`.
+2. `git tag v<version> && git push origin main --tags`.
+
+The `Release` workflow runs typecheck, tests and the build (`prepublishOnly`), then publishes to npm through trusted publishing, with provenance. No npm token or 2FA code is needed.
 
 ## Licence
 
