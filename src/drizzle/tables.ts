@@ -13,7 +13,8 @@ import {
 } from 'drizzle-orm/pg-core';
 import { isNotNull, isNull } from 'drizzle-orm';
 
-const ts = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
+/** Millisecond precision, the same as a JS Date, so a timestamp read back compares equal (e.g. in a cursor). */
+const ts = (name: string) => timestamp(name, { withTimezone: true, mode: 'date', precision: 3 });
 
 /** A user id column of the same SQL type as the app's `users.id` (`uuid` or `text`), so the foreign keys line up. */
 const userIdColumn = (usersId: AnyPgColumn) => (name: string) =>

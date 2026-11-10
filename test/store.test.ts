@@ -82,6 +82,24 @@ describe('drizzleStore', () => {
     expect(await ctx.db.select().from(tables.devices)).toEqual([]);
   });
 
+  it('changes nothing when it refuses, not even the token on another install', async () => {
+    await ctx.store.touchDevice(ALICE, 'install-a', { platform: 'ios', token: 'tok-a' });
+    await ctx.store.touchDevice(BOB, 'install-b', { platform: 'ios', token: 'tok-b' });
+    expect(await ctx.store.touchDevice(BOB, 'install-a', { platform: 'ios', token: 'tok-b' })).toBe(false);
+    const rows = await ctx.db.select({ id: tables.devices.id, token: tables.devices.token }).from(tables.devices);
+    expect(rows.sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+      { id: 'install-a', token: 'tok-a' },
+      { id: 'install-b', token: 'tok-b' },
+    ]);
+  });
+
+  it('stores timestamps at millisecond precision, so they read back equal to a Date', async () => {
+    const { rows } = await ctx.client.query<{ precision: number }>(
+      "select datetime_precision as precision from information_schema.columns where table_name = 'notification' and column_name = 'created_at'",
+    );
+    expect(rows[0]?.precision).toBe(3);
+  });
+
   it('refuses another user taking over an install id without its token', async () => {
     await ctx.store.touchDevice(ALICE, 'install-a', { platform: 'ios', token: 'tok-a' });
     expect(await ctx.store.touchDevice(BOB, 'install-a', { platform: 'ios', token: 'other' })).toBe(false);

@@ -134,20 +134,31 @@ export function drizzleStore(db: AnyPgDb, tables: NotifyTables, opts: DrizzleSto
      * changes and this returns false, so nobody can hijack a device id they merely know.
      */
     async touchDevice(userId: string, deviceId: string, info: { platform: string; token: string; appVersion?: string }): Promise<boolean> {
-      // A push token lives on one install: drop it from any other device row first (the app was
-      // reinstalled). Holding the token is proof enough, and the token column is unique.
-      await db.delete(devices).where(and(eq(devices.token, info.token), ne(devices.id, deviceId)));
-      const rows = await db
-        .insert(devices)
-        .values({ id: deviceId, userId, platform: info.platform, token: info.token, appVersion: info.appVersion ?? '' })
-        .onConflictDoUpdate({
-          target: devices.id,
-          set: { userId, platform: info.platform, token: info.token, appVersion: info.appVersion ?? '', lastSeenAt: new Date(), failureCount: 0 },
-          setWhere: or(eq(devices.userId, userId), eq(devices.token, info.token)),
-        })
-        .returning({ id: devices.id });
-      return rows.length > 0;
+      const refused = Symbol('refused');
+      try {
+        await db.transaction(async (tx) => {
+          // A push token lives on one install: drop it from any other device row first (the app was
+          // reinstalled). Holding the token is proof enough, and the token column is unique.
+          await tx.delete(devices).where(and(eq(devices.token, info.token), ne(devices.id, deviceId)));
+          const rows = await tx
+            .insert(devices)
+            .values({ id: deviceId, userId, platform: info.platform, token: info.token, appVersion: info.appVersion ?? '' })
+            .onConflictDoUpdate({
+              target: devices.id,
+              set: { userId, platform: info.platform, token: info.token, appVersion: info.appVersion ?? '', lastSeenAt: new Date(), failureCount: 0 },
+              setWhere: or(eq(devices.userId, userId), eq(devices.token, info.token)),
+            })
+            .returning({ id: devices.id });
+          // Refused: roll the token cleanup back too, so a refused call changes nothing.
+          if (rows.length === 0) throw refused;
+        });
+        return true;
+      } catch (error) {
+        if (error === refused) return false;
+        throw error;
+      }
     },
+
 
     /**
      * The device bookkeeping for one finished push delivery:

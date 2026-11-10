@@ -1,6 +1,6 @@
 {
   "name": "@devmonks/notify",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Plan-then-send notifications with an FCM HTTP v1 push adapter. No DB, no queue; the core entry has no dependencies. Optional email (Resend + React Email) and Drizzle entries.",
   "license": "MIT",
   "keywords": [
