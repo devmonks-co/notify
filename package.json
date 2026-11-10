@@ -1,0 +1,89 @@
+{
+  "name": "@devmonks/notify",
+  "version": "0.3.0",
+  "description": "Plan-then-send notifications with an FCM HTTP v1 push adapter. No DB, no queue; the core entry has no dependencies. Optional email (Resend + React Email) and Drizzle entries.",
+  "license": "MIT",
+  "keywords": [
+    "fcm",
+    "firebase",
+    "push",
+    "notifications",
+    "drizzle",
+    "resend"
+  ],
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/devmonks-co/notify.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./email": {
+      "types": "./dist/email/index.d.ts",
+      "import": "./dist/email/index.js"
+    },
+    "./drizzle": {
+      "types": "./dist/drizzle/index.d.ts",
+      "import": "./dist/drizzle/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "bun run typecheck && bun run test && bun run build"
+  },
+  "peerDependencies": {
+    "@react-email/components": ">=1",
+    "@react-email/render": ">=2",
+    "react": ">=18",
+    "react-dom": ">=18",
+    "drizzle-orm": ">=0.40"
+  },
+  "peerDependenciesMeta": {
+    "@react-email/components": {
+      "optional": true
+    },
+    "@react-email/render": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    },
+    "drizzle-orm": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.16",
+    "@react-email/components": "1.0.12",
+    "@react-email/render": "2.1.0",
+    "@types/node": "24",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "drizzle-kit": "^0.31.11",
+    "drizzle-orm": "0.45.2",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}
