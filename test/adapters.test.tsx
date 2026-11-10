@@ -91,6 +91,15 @@ describe('fcmPush', () => {
   };
   const content = { title: 'Hi', body: 'There', url: '/pages/1', data: { a: 'b' } };
 
+  it('times out a stalled send as retryable', async () => {
+    const f = (async (url: string, init: RequestInit) => {
+      if (url.startsWith('https://oauth2.googleapis.com')) return json(200, { access_token: 'tok', expires_in: 3600 });
+      return new Promise<Response>((_, reject) => init.signal?.addEventListener('abort', () => reject(init.signal?.reason)));
+    }) as unknown as typeof fetch;
+    const ch = fcmPush({ projectId: 'proj', clientEmail: 'svc@proj.iam', privateKey: pem, fetch: f, timeoutMs: 20 });
+    expect(await ch.send('device1', content)).toMatchObject({ ok: false, retryable: true });
+  });
+
   it('signs a JWT, caches the token, and sends', async () => {
     const { calls, ch } = mk(() => json(200, { name: 'projects/proj/messages/1' }));
     expect(await ch.send('device1', content)).toEqual({ ok: true, providerId: 'projects/proj/messages/1' });

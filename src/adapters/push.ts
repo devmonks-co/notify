@@ -10,6 +10,8 @@ export interface FcmOptions {
   defaults?: PushOptions;
   /** Injected for tests; defaults to global fetch. */
   fetch?: typeof fetch;
+  /** Per request (OAuth and send). A timed-out send is retryable. Default 8000 ms. */
+  timeoutMs?: number;
 }
 
 const SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
@@ -102,7 +104,7 @@ function fcmMessage(token: string, content: Content, o: PushOptions): Json {
  * whether a retry may work (`retryable`) or the token is dead (`deadAddress`); retrying is the caller's job.
  * The access token is cached until shortly before it expires. Needs only fetch and WebCrypto.
  */
-export function fcmPush({ projectId, clientEmail, privateKey, defaults, fetch: f = fetch }: FcmOptions): Channel {
+export function fcmPush({ projectId, clientEmail, privateKey, defaults, fetch: f = fetch, timeoutMs = 8000 }: FcmOptions): Channel {
   let cached: { token: string; expiresAt: number } | null = null;
   let refreshing: Promise<string> | null = null;
 
@@ -118,6 +120,7 @@ export function fcmPush({ projectId, clientEmail, privateKey, defaults, fetch: f
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion }).toString(),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) throw Object.assign(new Error(`oauth ${res.status}: ${(await res.text()).slice(0, 200)}`), { status: res.status });
     const j = (await res.json()) as { access_token: string; expires_in?: number };
@@ -142,6 +145,7 @@ export function fcmPush({ projectId, clientEmail, privateKey, defaults, fetch: f
           method: 'POST',
           headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: fcmMessage(token, content, { ...defaults, ...content.push }) }),
+          signal: AbortSignal.timeout(timeoutMs),
         });
       } catch (e) {
         return { ok: false, retryable: true, error: `network: ${errorMessage(e)}` };
@@ -184,7 +188,7 @@ export function logPush(logger: Logger): Channel {
   return {
     name: 'push',
     async send(token, content): Promise<SendResult> {
-      logger.info(`[push] token=${token.slice(0, 12)}… ${JSON.stringify({ title: content.title, body: content.body, url: content.url, data: content.data })}`);
+      logger.info(`[push] token=…${token.slice(-4)} ${JSON.stringify({ title: content.title, body: content.body, url: content.url, data: content.data })}`);
       return { ok: true };
     },
   };
