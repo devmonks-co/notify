@@ -1,6 +1,6 @@
 {
   "name": "@devmonks/notify",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Plan-then-send notifications with an FCM HTTP v1 push adapter. No DB, no queue; the core entry has no dependencies. Optional email (Resend + React Email) and Drizzle entries.",
   "license": "MIT",
   "keywords": [
@@ -23,15 +23,18 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./email": {
       "types": "./dist/email/index.d.ts",
-      "import": "./dist/email/index.js"
+      "import": "./dist/email/index.js",
+      "default": "./dist/email/index.js"
     },
     "./drizzle": {
       "types": "./dist/drizzle/index.d.ts",
-      "import": "./dist/drizzle/index.js"
+      "import": "./dist/drizzle/index.js",
+      "default": "./dist/drizzle/index.js"
     }
   },
   "files": [
@@ -46,7 +49,8 @@
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "prepublishOnly": "bun run typecheck && bun run test && bun run build"
+    "prepublishOnly": "bun run typecheck && bun run test && bun run build && bun run smoke",
+    "smoke": "node scripts/smoke.mjs"
   },
   "peerDependencies": {
     "@react-email/components": ">=1",

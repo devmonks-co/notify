@@ -1,8 +1,8 @@
 import { and, eq, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import type { PgDatabase } from 'drizzle-orm/pg-core';
 
-import type { Content, Delivery, Recipient, SendResult } from '../types';
-import type { NotifyTables } from './tables';
+import type { Content, Delivery, Recipient, SendResult } from '../types.js';
+import type { NotifyTables } from './tables.js';
 
 /** Devices are deleted after this many consecutive permanent failures. */
 export const MAX_DEVICE_FAILURES = 3;
