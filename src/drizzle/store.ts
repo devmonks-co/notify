@@ -1,30 +1,11 @@
 import { and, eq, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import type { PgDatabase } from 'drizzle-orm/pg-core';
 
+import { buildRecipients, lookupUsers, MAX_DEVICE_FAILURES, type DrizzleStoreOptions } from '../shared/store.js';
 import type { Content, Delivery, Recipient, SendResult } from '../types.js';
 import type { NotifyTables } from './tables.js';
 
-/** Devices are deleted after this many consecutive permanent failures. */
-export const MAX_DEVICE_FAILURES = 3;
-
-export interface UserInfo {
-  email?: string | null;
-  locale?: string | null;
-  timeZone?: string | null;
-}
-
-export interface DrizzleStoreOptions {
-  /** The app's user lookup: email, locale and time zone live in the app's own tables. */
-  getUser(id: string): Promise<UserInfo | null>;
-  /** Optional batch form of `getUser` for `loadRecipients`; without it, `getUser` runs per id. */
-  getUsers?(ids: readonly string[]): Promise<ReadonlyMap<string, UserInfo>>;
-  /** Preference defaults when a user has no row, e.g. `{ reads: { email: false } }`. */
-  defaultPrefs?: Record<string, Partial<Record<string, boolean>>>;
-  devices?: {
-    /** Delete devices not seen for this many days when `pruneDevices()` runs. null/undefined = never prune (default). */
-    pruneInactiveAfterDays?: number | null;
-  };
-}
+export { MAX_DEVICE_FAILURES, type DrizzleStoreOptions, type UserInfo } from '../shared/store.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyPgDb = PgDatabase<any, any, any>;
@@ -44,36 +25,16 @@ export function drizzleStore(db: AnyPgDb, tables: NotifyTables, opts: DrizzleSto
      */
     async loadRecipients(userIds: readonly string[]): Promise<Map<string, Recipient>> {
       const ids = [...new Set(userIds)];
-      const recipients = new Map<string, Recipient>();
-      if (ids.length === 0) return recipients;
-      const users = opts.getUsers
-        ? await opts.getUsers(ids)
-        : new Map((await Promise.all(ids.map(async (id) => [id, await opts.getUser(id)] as const))).filter((e): e is [string, UserInfo] => e[1] !== null));
+      if (ids.length === 0) return new Map();
+      const users = await lookupUsers(opts, ids);
       const known = ids.filter((id) => users.has(id));
-      if (known.length === 0) return recipients;
+      if (known.length === 0) return new Map();
       const [deviceRows, prefRows, settingRows] = await Promise.all([
         db.select({ userId: devices.userId, id: devices.id, token: devices.token, platform: devices.platform }).from(devices).where(inArray(devices.userId, known)),
         db.select().from(notificationPrefs).where(inArray(notificationPrefs.userId, known)),
         db.select().from(notificationSettings).where(inArray(notificationSettings.userId, known)),
       ]);
-      for (const id of known) {
-        const user = users.get(id)!;
-        // Null-prototype maps: category and channel are stored strings, so "__proto__" must stay a plain key.
-        const prefs: Recipient['prefs'] = Object.create(null);
-        for (const [cat, chans] of Object.entries(opts.defaultPrefs ?? {})) prefs[cat] = Object.assign(Object.create(null), chans);
-        for (const p of prefRows) if (p.userId === id) (prefs[p.category] ??= Object.create(null))[p.channel] = p.enabled;
-        const settings = settingRows.find((row) => row.userId === id);
-        recipients.set(id, {
-          id,
-          locale: user.locale || 'en',
-          timeZone: user.timeZone || 'UTC',
-          ...(user.email ? { email: user.email } : {}),
-          devices: deviceRows.filter((d) => d.userId === id).map(({ id: deviceId, token, platform }) => ({ id: deviceId, token, platform })),
-          prefs,
-          ...(settings?.quietFrom && settings.quietTo ? { quietHours: { from: settings.quietFrom, to: settings.quietTo } } : {}),
-        });
-      }
-      return recipients;
+      return buildRecipients(known, users, { devices: deviceRows, prefs: prefRows, settings: settingRows }, opts.defaultPrefs);
     },
 
     /**
