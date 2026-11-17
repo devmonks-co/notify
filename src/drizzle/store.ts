@@ -1,5 +1,5 @@
-import { and, eq, inArray, lt, ne, or, sql } from 'drizzle-orm';
-import type { PgDatabase } from 'drizzle-orm/pg-core';
+import { and, eq, inArray, lt, ne, notExists, or, sql } from 'drizzle-orm';
+import { alias, type PgDatabase } from 'drizzle-orm/pg-core';
 
 import { buildRecipients, lookupUsers, MAX_DEVICE_FAILURES, type DrizzleStoreOptions } from '../shared/store.js';
 import type { Content, Delivery, Recipient, SendResult } from '../types.js';
@@ -95,31 +95,30 @@ export function drizzleStore(db: AnyPgDb, tables: NotifyTables, opts: DrizzleSto
      * changes and this returns false, so nobody can hijack a device id they merely know.
      */
     async touchDevice(userId: string, deviceId: string, info: { platform: string; token: string; appVersion?: string }): Promise<boolean> {
-      const refused = Symbol('refused');
-      try {
-        await db.transaction(async (tx) => {
-          // A push token lives on one install: drop it from any other device row first (the app was
-          // reinstalled). Holding the token is proof enough, and the token column is unique.
-          await tx.delete(devices).where(and(eq(devices.token, info.token), ne(devices.id, deviceId)));
-          const rows = await tx
-            .insert(devices)
-            .values({ id: deviceId, userId, platform: info.platform, token: info.token, appVersion: info.appVersion ?? '' })
-            .onConflictDoUpdate({
-              target: devices.id,
-              set: { userId, platform: info.platform, token: info.token, appVersion: info.appVersion ?? '', lastSeenAt: new Date(), failureCount: 0 },
-              setWhere: or(eq(devices.userId, userId), eq(devices.token, info.token)),
-            })
-            .returning({ id: devices.id });
-          // Refused: roll the token cleanup back too, so a refused call changes nothing.
-          if (rows.length === 0) throw refused;
-        });
-        return true;
-      } catch (error) {
-        if (error === refused) return false;
-        throw error;
-      }
+      const appVersion = info.appVersion ?? '';
+      // The row at deviceId that blocks a takeover: another user's, and the caller does not hold its token.
+      const held = alias(devices, 'held');
+      const blocked = db
+        .select({ id: held.id })
+        .from(held)
+        .where(and(eq(held.id, deviceId), ne(held.userId, userId), ne(held.token, info.token)));
+      return db.transaction(async (tx) => {
+        // A push token lives on one install: drop it from any other device row first (the app was
+        // reinstalled). Holding the token is proof enough, and the token column is unique. Skipped when
+        // the upsert below will be refused, so a refused call changes nothing (no rollback needed).
+        await tx.delete(devices).where(and(eq(devices.token, info.token), ne(devices.id, deviceId), notExists(blocked)));
+        const rows = await tx
+          .insert(devices)
+          .values({ id: deviceId, userId, platform: info.platform, token: info.token, appVersion })
+          .onConflictDoUpdate({
+            target: devices.id,
+            set: { userId, platform: info.platform, token: info.token, appVersion, lastSeenAt: new Date(), failureCount: 0 },
+            setWhere: or(eq(devices.userId, userId), eq(devices.token, info.token)),
+          })
+          .returning({ id: devices.id });
+        return rows.length > 0;
+      });
     },
-
 
     /**
      * The device bookkeeping for one finished push delivery:
