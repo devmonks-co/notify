@@ -1,7 +1,7 @@
 {
   "name": "@devmonks/notify",
   "version": "0.5.1",
-  "description": "Plan-then-send notifications with an FCM HTTP v1 push adapter. No DB, no queue; the core entry has no dependencies. Optional email (Resend + React Email) and Drizzle entries.",
+  "description": "Plan-then-send notifications with an FCM HTTP v1 push adapter. No DB, no queue; the core entry has no dependencies. Optional email (Resend + React Email), Drizzle (Postgres), SQLite and D1 entries.",
   "license": "MIT",
   "keywords": [
     "fcm",
@@ -9,6 +9,8 @@
     "push",
     "notifications",
     "drizzle",
+    "sqlite",
+    "d1",
     "resend"
   ],
   "type": "module",
@@ -35,6 +37,16 @@
       "types": "./dist/drizzle/index.d.ts",
       "import": "./dist/drizzle/index.js",
       "default": "./dist/drizzle/index.js"
+    },
+    "./sqlite": {
+      "types": "./dist/sqlite/index.d.ts",
+      "import": "./dist/sqlite/index.js",
+      "default": "./dist/sqlite/index.js"
+    },
+    "./d1": {
+      "types": "./dist/d1/index.d.ts",
+      "import": "./dist/d1/index.js",
+      "default": "./dist/d1/index.js"
     }
   },
   "files": [
