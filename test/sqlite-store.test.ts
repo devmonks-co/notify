@@ -2,9 +2,11 @@ import Database from 'better-sqlite3';
 import { generateSQLiteDrizzleJson, generateSQLiteMigration } from 'drizzle-kit/api';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle as drizzleProxy } from 'drizzle-orm/sqlite-proxy';
+import { Miniflare } from 'miniflare';
 import { integer, sqliteTable, text, type AnySQLiteTable } from 'drizzle-orm/sqlite-core';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { D1Store } from '../src/d1/index.js';
 import { SqliteStore, sqliteTables, type AnySqliteDb, type AtomicStatement, type SqliteStoreOptions, type SqliteTables } from '../src/sqlite/index.js';
@@ -17,7 +19,7 @@ const BOB = '00000000-0000-4000-8000-00000000000b';
 
 /** The schema exactly as drizzle-kit generates it for an app with the given users table. */
 const ddl = async (schema: Record<string, AnySQLiteTable>) =>
-  (await generateSQLiteMigration(await generateSQLiteDrizzleJson({}), await generateSQLiteDrizzleJson(schema))).join('\n');
+  generateSQLiteMigration(await generateSQLiteDrizzleJson({}), await generateSQLiteDrizzleJson(schema));
 
 /**
  * D1's contract without D1: the statements are handed over up front and run in order, outside any
@@ -32,11 +34,33 @@ class SequentialStore extends SqliteStore {
 }
 
 type MakeStore = (db: AnySqliteDb, tables: SqliteTables, opts: SqliteStoreOptions) => SqliteStore;
-type MakeDb = (client: Database.Database) => AnySqliteDb;
 
-/** An async driver (sqlite-proxy) over the same in-memory database, so the default atomic's async path runs too. */
-const asyncDb: MakeDb = (client) =>
-  drizzleProxy(async (query, params, method) => {
+/** Raw SQL on the test database, for setup and for checks that look past Drizzle. */
+interface Raw {
+  run(query: string, ...params: unknown[]): Promise<void>;
+  all<T = Record<string, unknown>>(query: string, ...params: unknown[]): Promise<T[]>;
+}
+interface Connection {
+  db: AnySqliteDb;
+  raw: Raw;
+  close(): Promise<void>;
+}
+type Driver = () => Promise<Connection>;
+
+const rawOf = (client: Database.Database): Raw => ({
+  run: async (query, ...params) => void client.prepare(query).run(...params),
+  all: async <T>(query: string, ...params: unknown[]) => client.prepare(query).all(...params) as T[],
+});
+
+const betterSqlite: Driver = async () => {
+  const client = new Database(':memory:');
+  return { db: drizzle(client), raw: rawOf(client), close: async () => void client.close() };
+};
+
+/** An async driver (sqlite-proxy) over an in-memory database, so the default atomic's async path runs too. */
+const sqliteProxy: Driver = async () => {
+  const client = new Database(':memory:');
+  const db = drizzleProxy(async (query, params, method) => {
     const stmt = client.prepare(query);
     if (!stmt.reader) {
       stmt.run(...params);
@@ -45,35 +69,53 @@ const asyncDb: MakeDb = (client) =>
     if (method === 'get') return { rows: stmt.raw().get(...params) as unknown[] };
     return { rows: stmt.raw().all(...params) as unknown[] };
   });
+  return { db, raw: rawOf(client), close: async () => void client.close() };
+};
 
-const drivers: [string, MakeDb][] = [
-  ['better-sqlite3, sync', (client) => drizzle(client)],
-  ['sqlite-proxy, async', asyncDb],
+/** A real local D1 (workerd through miniflare), new for each test. */
+const d1: Driver = async () => {
+  const mf = new Miniflare({ modules: true, script: 'export default {}', d1Databases: ['DB'] });
+  const database = await mf.getD1Database('DB');
+  return {
+    db: drizzleD1(database as never),
+    raw: {
+      run: async (query, ...params) => void (await database.prepare(query).bind(...params).run()),
+      all: async <T>(query: string, ...params: unknown[]) => (await database.prepare(query).bind(...params).all<T>()).results,
+    },
+    close: () => mf.dispose(),
+  };
+};
+
+const drivers: [string, Driver][] = [
+  ['better-sqlite3, sync', betterSqlite],
+  ['sqlite-proxy, async', sqliteProxy],
+  ['miniflare D1', d1],
 ];
 
-async function setup(makeStore: MakeStore, makeDb: MakeDb = drivers[0]![1]) {
-  const client = new Database(':memory:');
-  client.exec(await ddl({ users, ...tables }));
-  client.prepare('insert into "user" values (?), (?)').run(ALICE, BOB);
-  const db = makeDb(client);
-  const store = makeStore(db, tables, {
+async function setup(makeStore: MakeStore, driver: Driver = betterSqlite) {
+  const conn = await driver();
+  for (const statement of await ddl({ users, ...tables })) await conn.raw.run(statement);
+  await conn.raw.run('insert into "user" values (?), (?)', ALICE, BOB);
+  const store = makeStore(conn.db, tables, {
     getUser: async (id) => (id === ALICE || id === BOB ? { email: `${id}@x.test` } : null),
     defaultPrefs: { alerts: { push: true } },
   });
-  return { client, db, store };
+  return { ...conn, store };
 }
 
-const variants: [string, MakeStore, MakeDb][] = [
-  ['transaction atomic, better-sqlite3', (db, t, opts) => new SqliteStore(db, t, opts), drivers[0]![1]],
-  ['transaction atomic, async sqlite-proxy', (db, t, opts) => new SqliteStore(db, t, opts), asyncDb],
-  ['batch-like atomic, better-sqlite3', (db, t, opts) => new SequentialStore(db, t, opts), drivers[0]![1]],
+const variants: [string, MakeStore, Driver][] = [
+  ['transaction atomic, better-sqlite3', (db, t, opts) => new SqliteStore(db, t, opts), betterSqlite],
+  ['transaction atomic, async sqlite-proxy', (db, t, opts) => new SqliteStore(db, t, opts), sqliteProxy],
+  ['batch-like atomic, better-sqlite3', (db, t, opts) => new SequentialStore(db, t, opts), betterSqlite],
+  ['D1Store, miniflare D1', (db, t, opts) => new D1Store(db as never, t, opts), d1],
 ];
 
-describe.each(variants)('SqliteStore (%s)', (_name, makeStore, makeDb) => {
+describe.each(variants)('SqliteStore (%s)', (_name, makeStore, driver) => {
   let ctx: Awaited<ReturnType<typeof setup>>;
   beforeEach(async () => {
-    ctx = await setup(makeStore, makeDb);
-  });
+    ctx = await setup(makeStore, driver);
+  }, 30_000);
+  afterEach(() => ctx.close());
 
   it('loads many recipients at once with their devices, prefs and defaults', async () => {
     await ctx.store.touchDevice(ALICE, 'install-a', { platform: 'ios', token: 'tok-a' });
@@ -88,7 +130,8 @@ describe.each(variants)('SqliteStore (%s)', (_name, makeStore, makeDb) => {
 
   it('loads more recipients than one IN list may bind on D1', async () => {
     const ids = Array.from({ length: 250 }, (_, i) => `u${i}`);
-    ctx.client.prepare(`insert into "user" values ${ids.map(() => '(?)').join(', ')}`).run(...ids);
+    // Literal values: one statement with 250 parameters would itself exceed D1's limit.
+    await ctx.raw.run(`insert into "user" values ${ids.map((id) => `('${id}')`).join(', ')}`);
     await ctx.store.touchDevice('u249', 'install-z', { platform: 'ios', token: 'tok-z' });
     const store = makeStore(ctx.db, tables, { getUser: async () => ({}) });
     const map = await store.loadRecipients(ids);
@@ -137,9 +180,9 @@ describe.each(variants)('SqliteStore (%s)', (_name, makeStore, makeDb) => {
   it('changes nothing when it refuses, not even the token on another install', async () => {
     await ctx.store.touchDevice(ALICE, 'install-a', { platform: 'ios', token: 'tok-a' });
     await ctx.store.touchDevice(BOB, 'install-b', { platform: 'ios', token: 'tok-b' });
-    const before = ctx.client.prepare('select * from notify_device order by id').all();
+    const before = await ctx.raw.all('select * from notify_device order by id');
     expect(await ctx.store.touchDevice(BOB, 'install-a', { platform: 'android', token: 'tok-b', appVersion: '9' })).toBe(false);
-    expect(ctx.client.prepare('select * from notify_device order by id').all()).toEqual(before);
+    expect(await ctx.raw.all('select * from notify_device order by id')).toEqual(before);
     const rows = await ctx.db.select({ id: tables.devices.id, token: tables.devices.token }).from(tables.devices);
     expect(rows.sort((a, b) => a.id.localeCompare(b.id))).toEqual([
       { id: 'install-a', token: 'tok-a' },
@@ -156,8 +199,8 @@ describe.each(variants)('SqliteStore (%s)', (_name, makeStore, makeDb) => {
   it('stores timestamps at millisecond precision, so they read back equal to a Date', async () => {
     // SQLite has no timestamp precision to inspect: check the stored value is integer milliseconds, also from the SQL default.
     const t0 = Date.now();
-    ctx.client.prepare("insert into notification (id, user_id, type, title) values ('raw', ?, 'raw', 'raw')").run(ALICE);
-    const { created_at: raw } = ctx.client.prepare("select created_at from notification where id = 'raw'").get() as { created_at: number };
+    await ctx.raw.run("insert into notification (id, user_id, type, title) values ('raw', ?, 'raw', 'raw')", ALICE);
+    const [{ created_at: raw } = { created_at: NaN }] = await ctx.raw.all<{ created_at: number }>("select created_at from notification where id = 'raw'");
     expect(Number.isInteger(raw)).toBe(true);
     expect(Math.abs(raw - t0)).toBeLessThan(5_000);
     const at = new Date(1_700_000_000_123);
@@ -177,9 +220,9 @@ describe.each(variants)('SqliteStore (%s)', (_name, makeStore, makeDb) => {
     await ctx.store.recordDelivery({ id: 'd1', idempotencyKey: 'k1', type: 'old', recipientId: ALICE, channel: 'push', to: 'x' } as never);
     await ctx.store.touchDevice(ALICE, 'install-a', { platform: 'ios', token: 'tok-a' });
     const day = 86_400_000;
-    ctx.client.exec(`update notification set created_at = created_at - 91 * ${day};
-      update notification_delivery set created_at = created_at - 91 * ${day};
-      update notify_device set last_seen_at = last_seen_at - 61 * ${day};`);
+    await ctx.raw.run(`update notification set created_at = created_at - 91 * ${day}`);
+    await ctx.raw.run(`update notification_delivery set created_at = created_at - 91 * ${day}`);
+    await ctx.raw.run(`update notify_device set last_seen_at = last_seen_at - 61 * ${day}`);
     await ctx.store.writeInbox(ALICE, { title: 'new', body: '' }, { type: 'new' });
     expect(await ctx.store.pruneHistory(90)).toEqual({ notifications: 1, deliveries: 1 });
     expect(await ctx.store.pruneDevices(60)).toBe(1);
@@ -187,21 +230,27 @@ describe.each(variants)('SqliteStore (%s)', (_name, makeStore, makeDb) => {
   });
 });
 
-describe.each(drivers)('SqliteStore.atomic (%s)', (_name, makeDb) => {
-  it('rolls every statement back when one fails', async () => {
-    class Exposed extends SqliteStore {
-      run(statements: AtomicStatement[]) {
-        return this.atomic(statements);
-      }
+const atomicCases: [string, MakeStore, Driver][] = [
+  ['SqliteStore, better-sqlite3', (db, t, o) => new SqliteStore(db, t, o), betterSqlite],
+  ['SqliteStore, async sqlite-proxy', (db, t, o) => new SqliteStore(db, t, o), sqliteProxy],
+  ['D1Store, miniflare D1', (db, t, o) => new D1Store(db as never, t, o), d1],
+];
+
+describe.each(atomicCases)('atomic (%s)', (_name, makeStore, driver) => {
+  it('rolls every statement back when one fails', { timeout: 30_000 }, async () => {
+    const { db, raw, store, close } = await setup(makeStore, driver);
+    try {
+      const atomic = (statements: AtomicStatement[]) =>
+        (store as unknown as { atomic(s: AtomicStatement[]): Promise<unknown[][]> }).atomic(statements);
+      const device = { id: 'install-a', userId: ALICE, platform: 'ios', token: 'tok-a' };
+      const insert = () => db.insert(tables.devices).values(device).returning({ id: tables.devices.id });
+      await expect(atomic([insert(), insert()])).rejects.toThrow();
+      expect(await raw.all('select count(*) as n from notify_device')).toEqual([{ n: 0 }]);
+      // Only the row counts are portable: the default atomic returns the driver's raw rows.
+      expect((await atomic([insert()])).map((rows) => rows.length)).toEqual([1]);
+    } finally {
+      await close();
     }
-    const { client, db } = await setup((d, t, o) => new SqliteStore(d, t, o), makeDb);
-    const store = new Exposed(db, tables, { getUser: async () => null });
-    const device = { id: 'install-a', userId: ALICE, platform: 'ios', token: 'tok-a' };
-    const insert = () => db.insert(tables.devices).values(device).returning({ id: tables.devices.id });
-    await expect(store.run([insert(), insert()])).rejects.toThrow();
-    expect(client.prepare('select count(*) as n from notify_device').get()).toEqual({ n: 0 });
-    // Only the row counts are portable: the default atomic returns the driver's raw rows.
-    expect((await store.run([insert()])).map((rows) => rows.length)).toEqual([1]);
   });
 });
 
@@ -210,7 +259,7 @@ describe('SqliteStore with an integer users.id', () => {
     const intUsers = sqliteTable('user', { id: integer().primaryKey() });
     const intTables = sqliteTables({ users: intUsers });
     const client = new Database(':memory:');
-    client.exec(await ddl({ users: intUsers, ...intTables }));
+    client.exec((await ddl({ users: intUsers, ...intTables })).join('\n'));
     client.exec('insert into "user" values (7)');
     const store = new SqliteStore(drizzle(client), intTables, { getUser: async (id) => (id === '7' ? {} : null) });
     expect(await store.touchDevice('7', 'install-a', { platform: 'ios', token: 'tok-a' })).toBe(true);
@@ -223,7 +272,7 @@ describe('SqliteStore with an integer users.id', () => {
 describe('D1Store', () => {
   it('runs the all-or-none writes as one db.batch of the statements', async () => {
     const client = new Database(':memory:');
-    client.exec(await ddl({ users, ...tables }));
+    client.exec((await ddl({ users, ...tables })).join('\n'));
     const real = drizzle(client);
     // A fake D1 database: builds queries like the real one, records what `batch` gets.
     let rows: unknown[] = [{ id: 'install-a' }];
