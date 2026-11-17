@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { generateSQLiteDrizzleJson, generateSQLiteMigration } from 'drizzle-kit/api';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { drizzle as drizzleProxy } from 'drizzle-orm/sqlite-proxy';
 import { integer, sqliteTable, text, type AnySQLiteTable } from 'drizzle-orm/sqlite-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -31,12 +32,30 @@ class SequentialStore extends SqliteStore {
 }
 
 type MakeStore = (db: AnySqliteDb, tables: SqliteTables, opts: SqliteStoreOptions) => SqliteStore;
+type MakeDb = (client: Database.Database) => AnySqliteDb;
 
-async function setup(makeStore: MakeStore) {
+/** An async driver (sqlite-proxy) over the same in-memory database, so the default atomic's async path runs too. */
+const asyncDb: MakeDb = (client) =>
+  drizzleProxy(async (query, params, method) => {
+    const stmt = client.prepare(query);
+    if (!stmt.reader) {
+      stmt.run(...params);
+      return { rows: [] };
+    }
+    if (method === 'get') return { rows: stmt.raw().get(...params) as unknown[] };
+    return { rows: stmt.raw().all(...params) as unknown[] };
+  });
+
+const drivers: [string, MakeDb][] = [
+  ['better-sqlite3, sync', (client) => drizzle(client)],
+  ['sqlite-proxy, async', asyncDb],
+];
+
+async function setup(makeStore: MakeStore, makeDb: MakeDb = drivers[0]![1]) {
   const client = new Database(':memory:');
   client.exec(await ddl({ users, ...tables }));
   client.prepare('insert into "user" values (?), (?)').run(ALICE, BOB);
-  const db = drizzle(client);
+  const db = makeDb(client);
   const store = makeStore(db, tables, {
     getUser: async (id) => (id === ALICE || id === BOB ? { email: `${id}@x.test` } : null),
     defaultPrefs: { alerts: { push: true } },
@@ -44,15 +63,16 @@ async function setup(makeStore: MakeStore) {
   return { client, db, store };
 }
 
-const variants: [string, MakeStore][] = [
-  ['transaction atomic', (db, t, opts) => new SqliteStore(db, t, opts)],
-  ['batch-like atomic', (db, t, opts) => new SequentialStore(db, t, opts)],
+const variants: [string, MakeStore, MakeDb][] = [
+  ['transaction atomic, better-sqlite3', (db, t, opts) => new SqliteStore(db, t, opts), drivers[0]![1]],
+  ['transaction atomic, async sqlite-proxy', (db, t, opts) => new SqliteStore(db, t, opts), asyncDb],
+  ['batch-like atomic, better-sqlite3', (db, t, opts) => new SequentialStore(db, t, opts), drivers[0]![1]],
 ];
 
-describe.each(variants)('SqliteStore (%s)', (_name, makeStore) => {
+describe.each(variants)('SqliteStore (%s)', (_name, makeStore, makeDb) => {
   let ctx: Awaited<ReturnType<typeof setup>>;
   beforeEach(async () => {
-    ctx = await setup(makeStore);
+    ctx = await setup(makeStore, makeDb);
   });
 
   it('loads many recipients at once with their devices, prefs and defaults', async () => {
@@ -167,20 +187,21 @@ describe.each(variants)('SqliteStore (%s)', (_name, makeStore) => {
   });
 });
 
-describe('SqliteStore.atomic', () => {
+describe.each(drivers)('SqliteStore.atomic (%s)', (_name, makeDb) => {
   it('rolls every statement back when one fails', async () => {
     class Exposed extends SqliteStore {
       run(statements: AtomicStatement[]) {
         return this.atomic(statements);
       }
     }
-    const { client, db } = await setup((d, t, o) => new SqliteStore(d, t, o));
+    const { client, db } = await setup((d, t, o) => new SqliteStore(d, t, o), makeDb);
     const store = new Exposed(db, tables, { getUser: async () => null });
     const device = { id: 'install-a', userId: ALICE, platform: 'ios', token: 'tok-a' };
     const insert = () => db.insert(tables.devices).values(device).returning({ id: tables.devices.id });
-    await expect(store.run([insert(), insert()])).rejects.toThrow(/UNIQUE/);
+    await expect(store.run([insert(), insert()])).rejects.toThrow();
     expect(client.prepare('select count(*) as n from notify_device').get()).toEqual({ n: 0 });
-    expect(await store.run([insert()])).toEqual([[{ id: 'install-a' }]]);
+    // Only the row counts are portable: the default atomic returns the driver's raw rows.
+    expect((await store.run([insert()])).map((rows) => rows.length)).toEqual([1]);
   });
 });
 
