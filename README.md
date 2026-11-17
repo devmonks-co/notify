@@ -7,6 +7,8 @@ Generic notifications for any fetch + WebCrypto runtime (Node 20+, Bun, Workers,
 | `@devmonks/notify` | notifier, FCM push, in-app, quiet hours | nothing |
 | `@devmonks/notify/email` | Resend adapter, React Email layout and templates | `react`, `react-dom`, `@react-email/components`, `@react-email/render` |
 | `@devmonks/notify/drizzle` | Postgres tables and a store | `drizzle-orm` |
+| `@devmonks/notify/sqlite` | SQLite tables and `SqliteStore` | `drizzle-orm` |
+| `@devmonks/notify/d1` | `D1Store` for Cloudflare D1 (and the SQLite tables) | `drizzle-orm` |
 
 The extra entries are optional peer dependencies: install them only if you import that entry. `/email` contains `.tsx`, so it needs `"jsx": "react-jsx"` in your tsconfig.
 
@@ -123,9 +125,32 @@ Store methods: `loadRecipient` / `loadRecipients(ids)` (batch, for fan-out), `wr
 
 Devices: one row per install (`id` is stable, the token may rotate). A dead address (`deadAddress`) deletes the device at once; any other permanent failure adds a strike and the device is deleted at 3; a success resets the count; retryable failures change nothing. `pruneDevices()` removes devices unseen for `pruneInactiveAfterDays` and does nothing while that is null.
 
+## Using with SQLite or D1 (optional, `@devmonks/notify/sqlite`, `@devmonks/notify/d1`)
+
+The same tables (names, columns, constraints) and the same store methods as the Drizzle entry, for SQLite. JSON is `text` in JSON mode, timestamps are integer milliseconds, booleans are integers. The user id columns take the type of your `users.id` (`text`, or `integer`: the store still reads and writes ids as strings).
+
+```ts
+// schema.ts
+import { sqliteTables } from '@devmonks/notify/sqlite'; // '@devmonks/notify/d1' re-exports it
+export const { notifications, devices, notificationPrefs, notificationSettings, notificationDeliveries } =
+  sqliteTables({ users });
+// then run your own `drizzle-kit generate` (dialect: 'sqlite')
+
+// runtime: better-sqlite3, bun:sqlite, libsql, Durable Objects, ...
+import { SqliteStore } from '@devmonks/notify/sqlite';
+const store = new SqliteStore(db, tables, opts); // opts as for drizzleStore
+
+// runtime: Cloudflare D1
+import { drizzle } from 'drizzle-orm/d1';
+import { D1Store } from '@devmonks/notify/d1';
+const store = new D1Store(drizzle(env.DB), tables, opts);
+```
+
+The writes that must apply all-or-none (`touchDevice`, the third-strike delete) go through one protected method, `atomic(statements)`. The statements are all built before any runs, and none depends on an earlier one's result, so nothing ever needs a rollback. `SqliteStore` runs them in `db.transaction`. D1 has no interactive transactions, so `D1Store` overrides only `atomic` and uses `db.batch(statements)`: D1 runs a batch in order as one transaction. `atomic` is the one override point for another driver. `loadRecipients` binds at most 100 ids per query, which is D1's limit.
+
 ## Tests
 
-`bun run test` covers the plan rules, the FCM message mapping, the Resend/FCM error mapping with mocked fetch, and that the core entry imports no package.
+`bun run test` covers the plan rules, the FCM message mapping, the Resend/FCM error mapping with mocked fetch, the Postgres store on PGlite, the SQLite store on in-memory better-sqlite3 (with a transaction and with a D1-like batch `atomic`), and that the core entry imports no package.
 
 ## Release
 
